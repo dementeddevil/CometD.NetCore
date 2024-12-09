@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Threading;
-using System.Timers;
+using System.Threading.Tasks;
 
 using CometD.NetCore.Bayeux;
 using CometD.NetCore.Bayeux.Client;
@@ -20,12 +20,11 @@ namespace CometD.NetCore.Client
     {
         private readonly object _stateUpdateInProgressLock = new object();
 
-        private readonly ILogger _logger;
+        private readonly ILogger<BayeuxClient> _logger;
 
         private readonly TransportRegistry _transportRegistry = new TransportRegistry();
         private readonly Dictionary<string, object> _options = new Dictionary<string, object>();
         private readonly Queue<IMutableMessage> _messageQueue = new Queue<IMutableMessage>();
-        private readonly CookieCollection _cookieCollection = new CookieCollection();
         private readonly ITransportListener _handshakeListener;
         private readonly ITransportListener _connectListener;
         private readonly ITransportListener _disconnectListener;
@@ -72,14 +71,13 @@ namespace CometD.NetCore.Client
                 if (clientTransport is HttpClientTransport httpTransport)
                 {
                     httpTransport.Url = url;
-                    httpTransport.SetCookieCollection(_cookieCollection);
                 }
             }
 
             _bayeuxClientState = new DisconnectedState(this, null);
         }
 
-        public BayeuxClient(string url, ILogger logger, params ClientTransport[] transports)
+        public BayeuxClient(string url, ILogger<BayeuxClient> logger, params ClientTransport[] transports)
             : this(url, transports)
         {
             _logger = logger;
@@ -99,12 +97,12 @@ namespace CometD.NetCore.Client
             }
         }
 
-        public override void Handshake()
+        public override Task HandshakeAsync(CancellationToken cancellationToken = default)
         {
-            Handshake(null);
+            return HandshakeAsync(null, cancellationToken);
         }
 
-        public override void Handshake(IDictionary<string, object> handshakeFields)
+        public override async Task HandshakeAsync(IDictionary<string, object> handshakeFields, CancellationToken cancellationToken = default)
         {
             Initialize();
 
@@ -117,7 +115,7 @@ namespace CometD.NetCore.Client
             _logger?.LogDebug($"Using initial transport {initialTransport.Name}"
                              + $" from {Print.List(allowedTransports)}");
 
-            UpdateBayeuxClientState(oldState => new HandshakingState(this, handshakeFields, initialTransport));
+            await UpdateBayeuxClientStateAsync(_ => new HandshakingState(this, handshakeFields, initialTransport), cancellationToken);
         }
 
         public override bool Connected => IsConnected(_bayeuxClientState);
@@ -126,9 +124,9 @@ namespace CometD.NetCore.Client
 
         public override string Id => _bayeuxClientState.ClientId;
 
-        public override void Disconnect()
+        public override async Task DisconnectAsync(CancellationToken cancellationToken = default)
         {
-            UpdateBayeuxClientState(
+            await UpdateBayeuxClientStateAsync(
                     oldState =>
                     {
                         if (IsConnected(oldState))
@@ -139,7 +137,8 @@ namespace CometD.NetCore.Client
                         {
                             return new DisconnectedState(this, oldState.Transport);
                         }
-                    });
+                    },
+                    cancellationToken);
         }
 
         protected override AbstractSessionChannel NewChannel(ChannelId channelId, long replayId)
@@ -154,7 +153,7 @@ namespace CometD.NetCore.Client
             return channel == null ? new ChannelId(channelId) : channel.ChannelId;
         }
 
-        protected override void SendBatch()
+        protected override async Task SendBatchAsync(CancellationToken cancellationToken = default)
         {
             var bayeuxClientState = _bayeuxClientState;
             if (IsHandshaking(bayeuxClientState))
@@ -165,7 +164,7 @@ namespace CometD.NetCore.Client
             var messages = TakeMessages();
             if (messages.Count > 0)
             {
-                SendMessages(messages);
+                await SendMessagesAsync(messages, cancellationToken);
             }
         }
 
@@ -200,44 +199,11 @@ namespace CometD.NetCore.Client
         /// <inheritdoc/>
         public IDictionary<string, object> Options => _options;
 
-        public long BackoffIncrement { get; private set; }
+        public int BackoffIncrement { get; private set; }
 
-        public long MaxBackoff { get; private set; }
+        public int MaxBackoff { get; private set; }
 
         public bool Disconnected => IsDisconnected(_bayeuxClientState);
-
-        public string GetCookie(string name)
-        {
-            var cookie = _cookieCollection[name];
-            if (cookie != null)
-            {
-                return cookie.Value;
-            }
-
-            return null;
-        }
-
-        public void SetCookie(Cookie cookie)
-        {
-            _cookieCollection.Add(cookie);
-        }
-
-        public void SetCookie(string name, string val)
-        {
-            SetCookie(name, val, -1);
-        }
-
-        public void SetCookie(string name, string val, int maxAge)
-        {
-            var cookie = new Cookie(name, val, null, null);
-            if (maxAge > 0)
-            {
-                cookie.Expires = DateTime.Now;
-                cookie.Expires.AddMilliseconds(maxAge);
-            }
-
-            _cookieCollection.Add(cookie);
-        }
 
         public void OnSending(IList<IMessage> messages)
         {
@@ -247,7 +213,12 @@ namespace CometD.NetCore.Client
         {
         }
 
-        protected void FailMessages(Exception x, IList<IMessage> messages)
+        public virtual void OnFailure(Exception e, IList<IMessage> messages)
+        {
+            _logger?.LogError($"{e}");
+        }
+
+        protected async Task FailMessagesAsync(Exception x, IList<IMessage> messages, CancellationToken cancellationToken = default)
         {
             foreach (var message in messages)
             {
@@ -261,23 +232,18 @@ namespace CometD.NetCore.Client
                     failed["exception"] = x;
                 }
 
-                Receive(failed);
+                await ReceiveAsync(failed, cancellationToken);
             }
         }
 
-        public virtual void OnFailure(Exception e, IList<IMessage> messages)
+        public Task<State> HandshakeAsync(int waitMs, CancellationToken cancellationToken = default)
         {
-            _logger?.LogError($"{e}");
+            return HandshakeAsync(null, waitMs, cancellationToken);
         }
 
-        public State Handshake(int waitMs)
+        public async Task<State> HandshakeAsync(IDictionary<string, object> template, int waitMs, CancellationToken cancellationToken = default)
         {
-            return Handshake(null, waitMs);
-        }
-
-        public State Handshake(IDictionary<string, object> template, int waitMs)
-        {
-            Handshake(template);
+            await HandshakeAsync(template, cancellationToken);
             ICollection<State> states = new List<State>
             {
                 State.CONNECTING,
@@ -286,7 +252,7 @@ namespace CometD.NetCore.Client
             return WaitFor(waitMs, states);
         }
 
-        protected bool SendHandshake()
+        protected async Task<bool> SendHandshakeAsync(CancellationToken cancellationToken = default)
         {
             var bayeuxClientState = _bayeuxClientState;
 
@@ -314,7 +280,7 @@ namespace CometD.NetCore.Client
                     Print.Dictionary(bayeuxClientState.HandshakeFields),
                     Print.Dictionary(bayeuxClientState.Transport as IDictionary<string, object>));
 
-                bayeuxClientState.Send(_handshakeListener, message);
+                await bayeuxClientState.SendAsync(_handshakeListener, message, cancellationToken: cancellationToken);
                 return true;
             }
 
@@ -334,7 +300,7 @@ namespace CometD.NetCore.Client
                 || bayeuxClientState.TypeValue == State.UNCONNECTED;
         }
 
-        protected void ProcessHandshake(IMutableMessage handshake)
+        protected async Task ProcessHandshakeAsync(IMutableMessage handshake, CancellationToken cancellationToken)
         {
             if (handshake.Successful)
             {
@@ -345,9 +311,10 @@ namespace CometD.NetCore.Client
                 var newTransport = negotiatedTransports.Count == 0 ? null : negotiatedTransports[0];
                 if (newTransport == null)
                 {
-                    UpdateBayeuxClientState(
-                            oldState => new DisconnectedState(this, oldState.Transport),
-                            () => Receive(handshake));
+                    await UpdateBayeuxClientStateAsync(
+                        oldState => new DisconnectedState(this, oldState.Transport),
+                        (ct) => ReceiveAsync(handshake, ct),
+                        cancellationToken);
 
                     // Signal the failure
                     handshake.Successful = false;
@@ -358,45 +325,24 @@ namespace CometD.NetCore.Client
                 }
                 else
                 {
-                    UpdateBayeuxClientState(
-                            oldState =>
-                            {
-                                if (newTransport != oldState.Transport)
-                                {
-                                    oldState.Transport.Reset();
-                                    newTransport.Init();
-                                }
-
-                                var action = GetAdviceAction(handshake.Advice, MessageFields.RECONNECT_RETRY_VALUE);
-                                if (MessageFields.RECONNECT_RETRY_VALUE.Equals(action))
-                                {
-                                    return new ConnectingState(
-                                        this,
-                                        oldState.HandshakeFields,
-                                        handshake.Advice,
-                                        newTransport,
-                                        handshake.ClientId);
-                                }
-                                else if (MessageFields.RECONNECT_NONE_VALUE.Equals(action))
-                                {
-                                    return new DisconnectedState(this, oldState.Transport);
-                                }
-
-                                return null;
-                            },
-                            () => Receive(handshake));
-                }
-            }
-            else
-            {
-                UpdateBayeuxClientState(
+                    await UpdateBayeuxClientStateAsync(
                         oldState =>
                         {
-                            var action = GetAdviceAction(handshake.Advice, MessageFields.RECONNECT_HANDSHAKE_VALUE);
-                            if (MessageFields.RECONNECT_HANDSHAKE_VALUE.Equals(action)
-                                || MessageFields.RECONNECT_RETRY_VALUE.Equals(action))
+                            if (newTransport != oldState.Transport)
                             {
-                                return new RehandshakingState(this, oldState.HandshakeFields, oldState.Transport, oldState.NextBackoff());
+                                oldState.Transport.Reset();
+                                newTransport.Init();
+                            }
+
+                            var action = GetAdviceAction(handshake.Advice, MessageFields.RECONNECT_RETRY_VALUE);
+                            if (MessageFields.RECONNECT_RETRY_VALUE.Equals(action))
+                            {
+                                return new ConnectingState(
+                                    this,
+                                    oldState.HandshakeFields,
+                                    handshake.Advice,
+                                    newTransport,
+                                    handshake.ClientId);
                             }
                             else if (MessageFields.RECONNECT_NONE_VALUE.Equals(action))
                             {
@@ -405,13 +351,36 @@ namespace CometD.NetCore.Client
 
                             return null;
                         },
-                        () => Receive(handshake));
+                        (ct) => ReceiveAsync(handshake, ct),
+                        cancellationToken);
+                }
+            }
+            else
+            {
+                await UpdateBayeuxClientStateAsync(
+                    oldState =>
+                    {
+                        var action = GetAdviceAction(handshake.Advice, MessageFields.RECONNECT_HANDSHAKE_VALUE);
+                        if (MessageFields.RECONNECT_HANDSHAKE_VALUE.Equals(action)
+                            || MessageFields.RECONNECT_RETRY_VALUE.Equals(action))
+                        {
+                            return new RehandshakingState(this, oldState.HandshakeFields, oldState.Transport, oldState.NextBackoff());
+                        }
+                        else if (MessageFields.RECONNECT_NONE_VALUE.Equals(action))
+                        {
+                            return new DisconnectedState(this, oldState.Transport);
+                        }
+
+                        return null;
+                    },
+                    (ct) => ReceiveAsync(handshake, ct),
+                    cancellationToken);
             }
         }
 
-        protected bool ScheduleHandshake(long interval, long backoff)
+        protected async Task ScheduleHandshakeAsync(int interval, int backoff, CancellationToken cancellationToken = default)
         {
-            return ScheduleAction((sender, e) => SendHandshake(), interval, backoff);
+            await ScheduleActionAsync(ct => SendHandshakeAsync(ct), interval, backoff, cancellationToken);
         }
 
         protected State CurrentState => _bayeuxClientState.TypeValue;
@@ -454,7 +423,7 @@ namespace CometD.NetCore.Client
             return State.INVALID;
         }
 
-        protected bool SendConnect(int clientTimeout)
+        protected async Task<bool> SendConnectAsync(int clientTimeout, CancellationToken cancellationToken = default)
         {
             var bayeuxClientState = _bayeuxClientState;
             if (IsHandshook(bayeuxClientState))
@@ -468,24 +437,24 @@ namespace CometD.NetCore.Client
                     message.GetAdvice(true)[MessageFields.TIMEOUT_FIELD] = 0;
                 }
 
-                bayeuxClientState.Send(_connectListener, message, clientTimeout);
+                await bayeuxClientState.SendAsync(_connectListener, message, clientTimeout, cancellationToken);
                 return true;
             }
 
             return false;
         }
 
-        protected bool SendMessages(IList<IMutableMessage> messages)
+        protected async Task<bool> SendMessagesAsync(IList<IMutableMessage> messages, CancellationToken cancellationToken = default)
         {
             var bayeuxClientState = _bayeuxClientState;
             if (bayeuxClientState.TypeValue == State.CONNECTING || IsConnected(bayeuxClientState))
             {
-                bayeuxClientState.Send(_publishListener, messages);
+                await bayeuxClientState.SendAsync(_publishListener, messages, cancellationToken: cancellationToken);
                 return true;
             }
             else
             {
-                FailMessages(null, ObjectConverter.ToListOfIMessage(messages));
+                await FailMessagesAsync(null, ObjectConverter.ToListOfIMessage(messages), cancellationToken);
                 return false;
             }
         }
@@ -533,9 +502,9 @@ namespace CometD.NetCore.Client
             return false;
         }
 
-        public void Abort()
+        public async Task AbortAsync(CancellationToken cancellationToken = default)
         {
-            UpdateBayeuxClientState(oldState => new AbortedState(this, oldState.Transport));
+            await UpdateBayeuxClientStateAsync(oldState => new AbortedState(this, oldState.Transport), cancellationToken);
         }
 
         private IList<IMutableMessage> TakeMessages()
@@ -555,9 +524,9 @@ namespace CometD.NetCore.Client
             return bayeuxClientState.TypeValue == State.DISCONNECTING || bayeuxClientState.TypeValue == State.DISCONNECTED;
         }
 
-        protected void ProcessConnect(IMutableMessage connect)
+        protected async Task ProcessConnectAsync(IMutableMessage connect, CancellationToken cancellationToken = default)
         {
-            UpdateBayeuxClientState(
+            await UpdateBayeuxClientStateAsync(
                     oldState =>
                     {
                         var advice = connect.Advice;
@@ -598,19 +567,21 @@ namespace CometD.NetCore.Client
 
                         return null;
                     },
-                    () => Receive(connect));
+                    (ct) => ReceiveAsync(connect, ct),
+                    cancellationToken);
         }
 
-        protected void ProcessDisconnect(IMutableMessage disconnect)
+        protected async Task ProcessDisconnectAsync(IMutableMessage disconnect, CancellationToken cancellationToken = default)
         {
-            UpdateBayeuxClientState(
+            await UpdateBayeuxClientStateAsync(
                     oldState => new DisconnectedState(this, oldState.Transport),
-                    () => Receive(disconnect));
+                    (ct) => ReceiveAsync(disconnect, ct),
+                    cancellationToken);
         }
 
-        protected void ProcessMessage(IMutableMessage message)
+        protected async Task ProcessMessageAsync(IMutableMessage message, CancellationToken cancellationToken = default)
         {
-            Receive(message);
+            await ReceiveAsync(message, cancellationToken);
         }
 
         private string GetAdviceAction(IDictionary<string, object> advice, string defaultResult)
@@ -624,40 +595,27 @@ namespace CometD.NetCore.Client
             return action;
         }
 
-        protected bool ScheduleConnect(long interval, long backoff, int clientTimeout = ClientTransport.DEFAULT_TIMEOUT)
+        protected async Task ScheduleConnectAsync(int interval, int backoff, int clientTimeout = ClientTransport.DEFAULT_TIMEOUT, CancellationToken cancellationToken = default)
         {
-            return ScheduleAction((object sender, ElapsedEventArgs e) => SendConnect(clientTimeout), interval, backoff);
+            await ScheduleActionAsync(ct => SendConnectAsync(clientTimeout, ct), interval, backoff, cancellationToken);
         }
 
-        private bool ScheduleAction(ElapsedEventHandler action, long interval, long backoff)
+        private async Task ScheduleActionAsync(Func<CancellationToken, Task> action, int interval, int backoff, CancellationToken cancellationToken = default)
         {
-#pragma warning disable CA2000 // Dispose objects before losing scope
-            var timer = new System.Timers.Timer();
-#pragma warning restore CA2000 // Dispose objects before losing scope
-            timer.Elapsed += action;
-            var wait = interval + backoff;
-            if (wait <= 0)
-            {
-                wait = 1;
-            }
-
-            timer.Interval = wait;
-            timer.AutoReset = false;
-            timer.Enabled = true;
-            return true;
+            await Task.Delay(interval + backoff, cancellationToken);
+            await action(cancellationToken);
         }
 
         protected void Initialize()
         {
-            BackoffIncrement = ObjectConverter.ToInt64(GetOption(BACKOFF_INCREMENT_OPTION), 1000L);
-
-            MaxBackoff = ObjectConverter.ToInt64(GetOption(MAX_BACKOFF_OPTION), 30000L);
+            BackoffIncrement = ObjectConverter.ToInt32(GetOption(BACKOFF_INCREMENT_OPTION), 1000);
+            MaxBackoff = ObjectConverter.ToInt32(GetOption(MAX_BACKOFF_OPTION), 30000);
         }
 
-        protected void Terminate()
+        protected async Task TerminateAsync(CancellationToken cancellationToken = default)
         {
             var messages = TakeMessages();
-            FailMessages(null, ObjectConverter.ToListOfIMessage(messages));
+            await FailMessagesAsync(null, ObjectConverter.ToListOfIMessage(messages), cancellationToken);
         }
 
         protected IMutableMessage NewMessage()
@@ -665,7 +623,7 @@ namespace CometD.NetCore.Client
             return new DictionaryMessage();
         }
 
-        protected void EnqueueSend(IMutableMessage message)
+        protected async Task EnqueueSendAsync(IMutableMessage message, CancellationToken cancellationToken = default)
         {
             if (CanSend())
             {
@@ -673,8 +631,8 @@ namespace CometD.NetCore.Client
                 {
                     message
                 };
-                var sent = SendMessages(messages);
 
+                var sent = await SendMessagesAsync(messages, cancellationToken);
                 _logger?.LogDebug("{0} message {1}", sent ? "Sent" : "Failed", message);
             }
             else
@@ -689,14 +647,17 @@ namespace CometD.NetCore.Client
             return !IsDisconnected(_bayeuxClientState) && !Batching && !IsHandshaking(_bayeuxClientState);
         }
 
-        private void UpdateBayeuxClientState(BayeuxClientStateUpdater_createDelegate create)
+        private Task UpdateBayeuxClientStateAsync(
+            Func<BayeuxClientState, BayeuxClientState> create,
+            CancellationToken cancellationToken = default)
         {
-            UpdateBayeuxClientState(create, null);
+            return UpdateBayeuxClientStateAsync(create, null, cancellationToken);
         }
 
-        private void UpdateBayeuxClientState(
-            BayeuxClientStateUpdater_createDelegate create,
-            BayeuxClientStateUpdater_postCreateDelegate postCreate)
+        private async Task UpdateBayeuxClientStateAsync(
+            Func<BayeuxClientState, BayeuxClientState> create,
+            Func<CancellationToken, Task> postCreate,
+            CancellationToken cancellationToken = default)
         {
             lock (_stateUpdateInProgressLock)
             {
@@ -719,14 +680,17 @@ namespace CometD.NetCore.Client
 
             _bayeuxClientState = newState;
 
-            postCreate?.Invoke();
+            if (postCreate != null)
+            {
+                await postCreate(cancellationToken);
+            }
 
             if (oldState.Type != newState.Type)
             {
                 newState.Enter(oldState.Type);
             }
 
-            newState.Execute();
+            await newState.ExecuteAsync(cancellationToken);
 
             // Notify threads waiting in waitFor()
             lock (_stateUpdateInProgressLock)
@@ -754,56 +718,56 @@ namespace CometD.NetCore.Client
 
         private class PublishTransportListener : ITransportListener
         {
-            protected BayeuxClient bayeuxClient;
+            protected BayeuxClient _bayeuxClient;
 
             public PublishTransportListener(BayeuxClient bayeuxClient)
             {
-                this.bayeuxClient = bayeuxClient;
+                _bayeuxClient = bayeuxClient;
             }
 
-            public void OnSending(IList<IMessage> messages)
+            public async Task OnSendingAsync(IList<IMessage> messages, CancellationToken cancellationToken = default)
             {
-                bayeuxClient.OnSending(messages);
+                _bayeuxClient.OnSending(messages);
             }
 
-            public void OnMessages(IList<IMutableMessage> messages)
+            public async Task OnMessagesAsync(IList<IMutableMessage> messages, CancellationToken cancellationToken = default)
             {
-                bayeuxClient.OnMessages(messages);
+                _bayeuxClient.OnMessages(messages);
                 foreach (var message in messages)
                 {
-                    ProcessMessage(message);
+                    await ProcessMessageAsync(message, cancellationToken);
                 }
             }
 
-            public void OnConnectException(Exception x, IList<IMessage> messages)
+            public async Task OnConnectExceptionAsync(Exception x, IList<IMessage> messages, CancellationToken cancellationToken = default)
             {
-                OnFailure(x, messages);
+                await OnFailureAsync(x, messages, cancellationToken);
             }
 
-            public void OnException(Exception x, IList<IMessage> messages)
+            public async Task OnExceptionAsync(Exception x, IList<IMessage> messages, CancellationToken cancellationToken = default)
             {
-                OnFailure(x, messages);
+                await OnFailureAsync(x, messages, cancellationToken);
             }
 
-            public void OnExpire(IList<IMessage> messages)
+            public async Task OnExpireAsync(IList<IMessage> messages, CancellationToken cancellationToken = default)
             {
-                OnFailure(new TimeoutException("expired"), messages);
+                await OnFailureAsync(new TimeoutException("expired"), messages, cancellationToken);
             }
 
-            public void OnProtocolError(string info, IList<IMessage> messages)
+            public async Task OnProtocolErrorAsync(string info, IList<IMessage> messages, CancellationToken cancellationToken = default)
             {
-                OnFailure(new ProtocolViolationException(info), messages);
+                await OnFailureAsync(new ProtocolViolationException(info), messages, cancellationToken);
             }
 
-            protected virtual void ProcessMessage(IMutableMessage message)
+            protected virtual async Task ProcessMessageAsync(IMutableMessage message, CancellationToken cancellationToken = default)
             {
-                bayeuxClient.ProcessMessage(message);
+                await _bayeuxClient.ProcessMessageAsync(message, cancellationToken);
             }
 
-            protected virtual void OnFailure(Exception x, IList<IMessage> messages)
+            protected virtual async Task OnFailureAsync(Exception x, IList<IMessage> messages, CancellationToken cancellationToken = default)
             {
-                bayeuxClient.OnFailure(x, messages);
-                bayeuxClient.FailMessages(x, messages);
+                _bayeuxClient.OnFailure(x, messages);
+                await _bayeuxClient.FailMessagesAsync(x, messages, cancellationToken);
             }
         }
 
@@ -814,21 +778,23 @@ namespace CometD.NetCore.Client
             {
             }
 
-            protected override void OnFailure(Exception x, IList<IMessage> messages)
+            protected override async Task OnFailureAsync(Exception x, IList<IMessage> messages, CancellationToken cancellationToken = default)
             {
-                bayeuxClient.UpdateBayeuxClientState(oldState => new RehandshakingState(bayeuxClient, oldState.HandshakeFields, oldState.Transport, oldState.NextBackoff()));
-                base.OnFailure(x, messages);
+                await _bayeuxClient.UpdateBayeuxClientStateAsync(
+                    oldState => new RehandshakingState(_bayeuxClient, oldState.HandshakeFields, oldState.Transport, oldState.NextBackoff()),
+                    cancellationToken);
+                await base.OnFailureAsync(x, messages, cancellationToken);
             }
 
-            protected override void ProcessMessage(IMutableMessage message)
+            protected override async Task ProcessMessageAsync(IMutableMessage message, CancellationToken cancellationToken = default)
             {
                 if (ChannelFields.META_HANDSHAKE.Equals(message.Channel))
                 {
-                    bayeuxClient.ProcessHandshake(message);
+                    await _bayeuxClient.ProcessHandshakeAsync(message, cancellationToken);
                 }
                 else
                 {
-                    base.ProcessMessage(message);
+                    await base.ProcessMessageAsync(message, cancellationToken);
                 }
             }
         }
@@ -840,22 +806,23 @@ namespace CometD.NetCore.Client
             {
             }
 
-            protected override void OnFailure(Exception x, IList<IMessage> messages)
+            protected override async Task OnFailureAsync(Exception x, IList<IMessage> messages, CancellationToken cancellationToken = default)
             {
-                bayeuxClient.UpdateBayeuxClientState(
-                        oldState => new UnconnectedState(bayeuxClient, oldState.HandshakeFields, oldState.Advice, oldState.Transport, oldState.ClientId, oldState.NextBackoff()));
-                base.OnFailure(x, messages);
+                await _bayeuxClient.UpdateBayeuxClientStateAsync(
+                        oldState => new UnconnectedState(_bayeuxClient, oldState.HandshakeFields, oldState.Advice, oldState.Transport, oldState.ClientId, oldState.NextBackoff()),
+                        cancellationToken);
+                await base.OnFailureAsync(x, messages, cancellationToken);
             }
 
-            protected override void ProcessMessage(IMutableMessage message)
+            protected override async Task ProcessMessageAsync(IMutableMessage message, CancellationToken cancellationToken = default)
             {
                 if (ChannelFields.META_CONNECT.Equals(message.Channel))
                 {
-                    bayeuxClient.ProcessConnect(message);
+                    await _bayeuxClient.ProcessConnectAsync(message, cancellationToken);
                 }
                 else
                 {
-                    base.ProcessMessage(message);
+                    await base.ProcessMessageAsync(message, cancellationToken);
                 }
             }
         }
@@ -867,64 +834,65 @@ namespace CometD.NetCore.Client
             {
             }
 
-            protected override void OnFailure(Exception x, IList<IMessage> messages)
+            protected override async Task OnFailureAsync(Exception x, IList<IMessage> messages, CancellationToken cancellationToken = default)
             {
-                bayeuxClient.UpdateBayeuxClientState(
-                        oldState => new DisconnectedState(bayeuxClient, oldState.Transport));
-                base.OnFailure(x, messages);
+                await _bayeuxClient.UpdateBayeuxClientStateAsync(
+                        oldState => new DisconnectedState(_bayeuxClient, oldState.Transport),
+                        cancellationToken);
+                await base.OnFailureAsync(x, messages, cancellationToken);
             }
 
-            protected override void ProcessMessage(IMutableMessage message)
+            protected override async Task ProcessMessageAsync(IMutableMessage message, CancellationToken cancellationToken = default)
             {
                 if (ChannelFields.META_DISCONNECT.Equals(message.Channel))
                 {
-                    bayeuxClient.ProcessDisconnect(message);
+                    await _bayeuxClient.ProcessDisconnectAsync(message, cancellationToken);
                 }
                 else
                 {
-                    base.ProcessMessage(message);
+                    await base.ProcessMessageAsync(message, cancellationToken);
                 }
             }
         }
 
         public class BayeuxClientChannel : AbstractSessionChannel
         {
-            protected BayeuxClient bayeuxClient;
+            protected BayeuxClient _bayeuxClient;
 
             public BayeuxClientChannel(BayeuxClient bayeuxClient, ChannelId channelId, long replayId)
                 : base(channelId, replayId)
             {
-                this.bayeuxClient = bayeuxClient;
+                _bayeuxClient = bayeuxClient;
             }
 
             public override IClientSession Session => this as IClientSession;
 
-            protected override void SendSubscribe()
+            protected override async Task SendSubscribeAsync(CancellationToken cancellationToken = default)
             {
-                var message = bayeuxClient.NewMessage();
+                var message = _bayeuxClient.NewMessage();
                 message.Channel = ChannelFields.META_SUBSCRIBE;
                 message[MessageFields.SUBSCRIPTION_FIELD] = Id;
                 message.ReplayId = ReplayId;
-                bayeuxClient.EnqueueSend(message);
+                await _bayeuxClient.EnqueueSendAsync(message, cancellationToken);
             }
 
-            protected override void SendUnSubscribe()
+            protected override async Task SendUnsubscribeAsync(CancellationToken cancellationToken = default)
             {
-                var message = bayeuxClient.NewMessage();
+                var message = _bayeuxClient.NewMessage();
                 message.Channel = ChannelFields.META_UNSUBSCRIBE;
                 message[MessageFields.SUBSCRIPTION_FIELD] = Id;
                 message.ReplayId = ReplayId;
-                bayeuxClient.EnqueueSend(message);
+                await _bayeuxClient.EnqueueSendAsync(message, cancellationToken);
             }
 
-            public override void Publish(object data)
+            public override Task PublishAsync(object data, CancellationToken cancellationToken = default)
             {
-                Publish(data, null);
+                return PublishAsync(data, null, cancellationToken);
             }
 
-            public override void Publish(object data, string messageId)
+            public override async Task PublishAsync(object data, string messageId, CancellationToken cancellationToken = default)
             {
-                var message = bayeuxClient.NewMessage();
+                var message = _bayeuxClient.NewMessage();
                 message.Channel = Id;
                 message.Data = data;
                 if (messageId != null)
@@ -932,13 +900,9 @@ namespace CometD.NetCore.Client
                     message.Id = messageId;
                 }
 
-                bayeuxClient.EnqueueSend(message);
+                await _bayeuxClient.EnqueueSendAsync(message, cancellationToken);
             }
         }
-
-        private delegate BayeuxClientState BayeuxClientStateUpdater_createDelegate(BayeuxClientState oldState);
-
-        private delegate void BayeuxClientStateUpdater_postCreateDelegate();
 
         public abstract class BayeuxClientState
         {
@@ -947,7 +911,7 @@ namespace CometD.NetCore.Client
             public IDictionary<string, object> Advice;
             public ClientTransport Transport;
             public string ClientId;
-            public long Backoff;
+            public int Backoff;
             protected BayeuxClient _bayeuxClient;
 
             protected BayeuxClientState(
@@ -957,7 +921,7 @@ namespace CometD.NetCore.Client
                 IDictionary<string, object> advice,
                 ClientTransport transport,
                 string clientId,
-                long backoff)
+                int backoff)
             {
                 _bayeuxClient = bayeuxClient;
                 TypeValue = type;
@@ -968,30 +932,30 @@ namespace CometD.NetCore.Client
                 Backoff = backoff;
             }
 
-            public long Interval
+            public int Interval
             {
                 get
                 {
-                    long result = 0;
+                    int result = 0;
                     if (Advice?.ContainsKey(MessageFields.INTERVAL_FIELD) == true)
                     {
-                        result = ObjectConverter.ToInt64(Advice[MessageFields.INTERVAL_FIELD], result);
+                        result = ObjectConverter.ToInt32(Advice[MessageFields.INTERVAL_FIELD], result);
                     }
 
                     return result;
                 }
             }
 
-            public void Send(ITransportListener listener, IMutableMessage message, int clientTimeout = ClientTransport.DEFAULT_TIMEOUT)
+            public Task SendAsync(ITransportListener listener, IMutableMessage message, int clientTimeout = ClientTransport.DEFAULT_TIMEOUT, CancellationToken cancellationToken = default)
             {
                 IList<IMutableMessage> messages = new List<IMutableMessage>
                 {
                     message
                 };
-                Send(listener, messages, clientTimeout);
+                return SendAsync(listener, messages, clientTimeout, cancellationToken);
             }
 
-            public void Send(ITransportListener listener, IList<IMutableMessage> messages, int clientTimeout = ClientTransport.DEFAULT_TIMEOUT)
+            public async Task SendAsync(ITransportListener listener, IList<IMutableMessage> messages, int clientTimeout = ClientTransport.DEFAULT_TIMEOUT, CancellationToken cancellationToken = default)
             {
                 foreach (var message in messages)
                 {
@@ -1013,11 +977,11 @@ namespace CometD.NetCore.Client
 
                 if (messages.Count > 0)
                 {
-                    Transport.Send(listener, messages, clientTimeout);
+                    await Transport.SendAsync(listener, messages, clientTimeout, cancellationToken);
                 }
             }
 
-            public long NextBackoff()
+            public int NextBackoff()
             {
                 return Math.Min(Backoff + _bayeuxClient.BackoffIncrement, _bayeuxClient.MaxBackoff);
             }
@@ -1028,7 +992,7 @@ namespace CometD.NetCore.Client
             {
             }
 
-            public abstract void Execute();
+            public abstract Task ExecuteAsync(CancellationToken cancellationToken = default);
 
             public State Type => TypeValue;
 
@@ -1050,10 +1014,10 @@ namespace CometD.NetCore.Client
                 return newState.TypeValue == State.HANDSHAKING;
             }
 
-            public override void Execute()
+            public override async Task ExecuteAsync(CancellationToken cancellationToken = default)
             {
                 Transport.Reset();
-                _bayeuxClient.Terminate();
+                await _bayeuxClient.TerminateAsync(cancellationToken);
             }
         }
 
@@ -1064,10 +1028,10 @@ namespace CometD.NetCore.Client
             {
             }
 
-            public override void Execute()
+            public override Task ExecuteAsync(CancellationToken cancellationToken = default)
             {
                 Transport.Abort();
-                base.Execute();
+                return base.ExecuteAsync(cancellationToken);
             }
         }
 
@@ -1091,12 +1055,12 @@ namespace CometD.NetCore.Client
                 _bayeuxClient.ResetSubscriptions();
             }
 
-            public override void Execute()
+            public override async Task ExecuteAsync(CancellationToken cancellationToken = default)
             {
                 // The state could change between now and when sendHandshake() runs;
                 // in this case the handshake message will not be sent and will not
                 // be failed, because most probably the client has been disconnected.
-                _bayeuxClient.SendHandshake();
+                await _bayeuxClient.SendHandshakeAsync(cancellationToken);
             }
         }
 
@@ -1106,7 +1070,7 @@ namespace CometD.NetCore.Client
                 BayeuxClient bayeuxClient,
                 IDictionary<string, object> handshakeFields,
                 ClientTransport transport,
-                long backoff)
+                int backoff)
                 : base(bayeuxClient, State.REHANDSHAKING, handshakeFields, null, transport, null, backoff)
             {
             }
@@ -1129,9 +1093,9 @@ namespace CometD.NetCore.Client
                 }
             }
 
-            public override void Execute()
+            public override async Task ExecuteAsync(CancellationToken cancellationToken = default)
             {
-                _bayeuxClient.ScheduleHandshake(Interval, Backoff);
+                await _bayeuxClient.ScheduleHandshakeAsync(Interval, Backoff, cancellationToken);
             }
         }
 
@@ -1156,11 +1120,11 @@ namespace CometD.NetCore.Client
                     newState.TypeValue == State.DISCONNECTED;
             }
 
-            public override void Execute()
+            public override async Task ExecuteAsync(CancellationToken cancellationToken = default)
             {
                 // Send the messages that may have queued up before the handshake completed
-                _bayeuxClient.SendBatch();
-                _bayeuxClient.ScheduleConnect(Interval, Backoff);
+                await _bayeuxClient.SendBatchAsync(cancellationToken);
+                await _bayeuxClient.ScheduleConnectAsync(Interval, Backoff, cancellationToken: cancellationToken);
             }
         }
 
@@ -1185,7 +1149,7 @@ namespace CometD.NetCore.Client
                     newState.TypeValue == State.DISCONNECTED;
             }
 
-            public override void Execute()
+            public override async Task ExecuteAsync(CancellationToken cancellationToken = default)
             {
                 var adviceTimeoutField = _bayeuxClient?._bayeuxClientState?.Advice[MessageFields.TIMEOUT_FIELD];
 
@@ -1194,12 +1158,12 @@ namespace CometD.NetCore.Client
                     int adviceTimeoutValue = Convert.ToInt32(adviceTimeoutField);
                     if (adviceTimeoutValue != 0)
                     {
-                        _bayeuxClient?.ScheduleConnect(Interval, Backoff, adviceTimeoutValue);
+                        await _bayeuxClient?.ScheduleConnectAsync(Interval, Backoff, adviceTimeoutValue, cancellationToken);
                         return;
                     }
                 }
 
-                _bayeuxClient?.ScheduleConnect(Interval, Backoff);
+                await _bayeuxClient?.ScheduleConnectAsync(Interval, Backoff, cancellationToken: cancellationToken);
             }
         }
 
@@ -1211,7 +1175,7 @@ namespace CometD.NetCore.Client
                 IDictionary<string, object> advice,
                 ClientTransport transport,
                 string clientId,
-                long backoff)
+                int backoff)
                 : base(bayeuxClient, State.UNCONNECTED, handshakeFields, advice, transport, clientId, backoff)
             {
             }
@@ -1224,9 +1188,9 @@ namespace CometD.NetCore.Client
                     newState.TypeValue == State.DISCONNECTED;
             }
 
-            public override void Execute()
+            public override async Task ExecuteAsync(CancellationToken cancellationToken = default)
             {
-                _bayeuxClient.ScheduleConnect(Interval, Backoff);
+                await _bayeuxClient.ScheduleConnectAsync(Interval, Backoff, cancellationToken: cancellationToken);
             }
         }
 
@@ -1242,11 +1206,11 @@ namespace CometD.NetCore.Client
                 return newState.TypeValue == State.DISCONNECTED;
             }
 
-            public override void Execute()
+            public override async Task ExecuteAsync(CancellationToken cancellationToken = default)
             {
                 var message = _bayeuxClient.NewMessage();
                 message.Channel = ChannelFields.META_DISCONNECT;
-                Send(_bayeuxClient._disconnectListener, message);
+                await SendAsync(_bayeuxClient._disconnectListener, message, cancellationToken: cancellationToken);
             }
         }
     }

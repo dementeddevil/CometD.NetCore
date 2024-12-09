@@ -1,4 +1,7 @@
-﻿namespace CometD.NetCore.Bayeux.Client
+﻿using System.Threading;
+using System.Threading.Tasks;
+
+namespace CometD.NetCore.Bayeux.Client
 {
     /// <summary> <p>A client side channel representation.</p>
     /// <p>A {@link ClientSessionChannel} is scoped to a particular {@link ClientSession}
@@ -30,7 +33,7 @@
         /// <summary> Equivalent to {@link #publish(Object, Object) publish(data, null)}.</summary>
         /// <param name="data">the data to publish.
         /// </param>
-        void Publish(object data);
+        Task PublishAsync(object data, CancellationToken cancellationToken = default);
 
         /// <summary> Publishes the given {@code data} to this channel,
         /// optionally specifying the {@code messageId} to set on the
@@ -43,7 +46,7 @@
         /// </param>
         /// <seealso cref="IMessage.getId()">
         /// </seealso>
-        void Publish(object data, string messageId);
+        Task PublishAsync(object data, string messageId, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Removes Client Session Channel Listener.
@@ -52,11 +55,11 @@
         /// </param>
         void RemoveListener(IClientSessionChannelListener listener);
 
-        void Subscribe(IMessageListener listener);
+        Task SubscribeAsync(IMessageListener listener, CancellationToken cancellationToken = default);
 
-        void Unsubscribe(IMessageListener listener);
+        Task UnsubscribeAsync(IMessageListener listener, CancellationToken cancellationToken = default);
 
-        void Unsubscribe();
+        Task UnsubscribeAsync(CancellationToken cancellationToken = default);
     }
 
     /// <summary> <p>Represents a listener on a {@link ClientSessionChannel}.</p>

@@ -1,4 +1,6 @@
 ﻿using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace CometD.NetCore.Bayeux.Client
 {
@@ -25,16 +27,17 @@ namespace CometD.NetCore.Bayeux.Client
         void RemoveExtension(IExtension extension);
 
         /// <summary> <p>Equivalent to {@link #handshake(Map) handshake(null)}.</p></summary>
-        void Handshake();
+        /// <param name="cancellationToken"></param>
+        Task HandshakeAsync(CancellationToken cancellationToken = default);
 
         /// <summary> <p>Initiates the bayeux protocol handshake with the server(s).</p>
         /// <p>The handshake initiated by this method is asynchronous and
         /// does not wait for the handshake response.</p>
         ///
         /// </summary>
-        /// <param name="fields">additional fields to add to the handshake message.
-        /// </param>
-        void Handshake(IDictionary<string, object> fields);
+        /// <param name="fields">additional fields to add to the handshake message.</param>
+        /// <param name="cancellationToken"></param>
+        Task HandshakeAsync(IDictionary<string, object> fields, CancellationToken cancellationToken = default);
 
         /// <summary> <p>Returns a client side channel scoped by this session.</p>
         /// <p>The channel name may be for a specific channel (e.g. "/foo/bar")

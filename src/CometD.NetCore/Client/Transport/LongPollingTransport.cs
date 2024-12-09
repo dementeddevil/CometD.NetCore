@@ -1,11 +1,10 @@
 using System;
 using System.Collections.Generic;
-using System.Collections.Specialized;
-using System.IO;
-using System.Net;
+using System.Net.Http;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 
 using CometD.NetCore.Bayeux;
 using CometD.NetCore.Common;
@@ -21,24 +20,26 @@ namespace CometD.NetCore.Client.Transport
         private static ILogger _logger;
 
         private readonly List<TransportExchange> _exchanges = new List<TransportExchange>();
-        private readonly List<LongPollingRequest> _transportQueue = new List<LongPollingRequest>();
-        private readonly HashSet<LongPollingRequest> _transmissions = new HashSet<LongPollingRequest>();
+        private readonly HashSet<TransportExchange> _transmissions = new HashSet<TransportExchange>();
         private readonly object _lockObject = new object();
-
+        private readonly IHttpClientFactory _httpClientFactory;
         private bool _appendMessageType;
 
         public LongPollingTransport(
+            IHttpClientFactory httpClientFactory,
             IDictionary<string, object> options,
-            NameValueCollection headers)
+            IDictionary<string, string> headers)
             : base("long-polling", options, headers)
         {
+            _httpClientFactory = httpClientFactory;
         }
 
         public LongPollingTransport(
+            IHttpClientFactory httpClientFactory,
             IDictionary<string, object> options,
-            NameValueCollection headers,
+            IDictionary<string, string> headers,
             ILogger logger)
-            : this(options, headers)
+            : this(httpClientFactory, options, headers)
         {
             _logger = logger;
         }
@@ -80,93 +81,98 @@ namespace CometD.NetCore.Client.Transport
         {
         }
 
-        // Fix for not running more than two simultaneous requests:
-        public class LongPollingRequest
-        {
-            public int RequestTimout;
-            public TransportExchange Exchange;
-
-            private readonly ITransportListener _listener;
-            private readonly IList<IMutableMessage> _messages;
-            private readonly HttpWebRequest _request;
-
-            public LongPollingRequest(
-                ITransportListener listener,
-                IList<IMutableMessage> messages,
-                HttpWebRequest request,
-                int requestTimeout = DEFAULT_TIMEOUT)
-            {
-                _listener = listener;
-                _messages = messages;
-                _request = request;
-                RequestTimout = requestTimeout;
-            }
-
-            public void Send()
-            {
-                try
-                {
-                    _request.BeginGetRequestStream(new AsyncCallback(GetRequestStreamCallback), Exchange);
-                }
-                catch (Exception e)
-                {
-                    Exchange.Dispose();
-                    _listener.OnException(e, ObjectConverter.ToListOfIMessage(_messages));
-                }
-            }
-        }
-
-        private void PerformNextRequest()
+        private async Task PerformNextRequestAsync(CancellationToken cancellationToken = default)
         {
             var ok = false;
-            LongPollingRequest nextRequest = null;
+            TransportExchange nextRequest = null;
 
             lock (_lockObject)
             {
-                if (_transportQueue.Count > 0 && _transmissions.Count <= 1)
+                if (_exchanges.Count > 0)
                 {
                     ok = true;
-                    nextRequest = _transportQueue[0];
-                    _transportQueue.Remove(nextRequest);
+                    nextRequest = _exchanges[0];
+                    _exchanges.Remove(nextRequest);
                     _transmissions.Add(nextRequest);
                 }
             }
 
             if (ok && nextRequest != null)
             {
-                nextRequest.Send();
+                // Get HTTP client and pull message from exchange
+                var httpClient = _httpClientFactory.CreateClient("cometd");
+                try
+                {
+                    // Notify hook we are sending the next batch of messages
+                    await nextRequest.Listener.OnSendingAsync(ObjectConverter.ToListOfIMessage(nextRequest.Messages), cancellationToken);
+
+                    // Initiate the next request across the HTTP client
+                    nextRequest.AbortAfter(nextRequest.RequestTimeout);
+                    nextRequest.IsSending = true;
+                    using (var httpResponse = await httpClient.SendAsync(nextRequest.Request, nextRequest.CancellationToken))
+                    {
+                        nextRequest.IsSending = false;
+
+                        try
+                        {
+                            _logger?.LogDebug("Received message(s).");
+#if NET7_0_OR_GREATER
+                            var stringContent = await httpResponse.Content.ReadAsStringAsync(cancellationToken);
+#else
+                            var stringContent = await httpResponse.Content.ReadAsStringAsync();
+#endif
+                            nextRequest.Messages = DictionaryMessage.ParseMessages(stringContent);
+                        }
+                        catch (Exception e)
+                        {
+                            _logger?.LogError(e, $"Failed to parse the messages json: {e}");
+                        }
+                    }
+
+                    await nextRequest.Listener.OnMessagesAsync(nextRequest.Messages, cancellationToken);
+                }
+                catch (Exception e)
+                {
+                    nextRequest.IsSending = false;
+                    await nextRequest.Listener.OnExceptionAsync(e, ObjectConverter.ToListOfIMessage(nextRequest.Messages), cancellationToken);
+                }
+                finally
+                {
+                    await nextRequest.DisposeAsync();
+                }
             }
         }
 
-        public void AddRequest(LongPollingRequest request)
+        public async Task AddRequest(TransportExchange request, CancellationToken cancellationToken = default)
         {
             lock (_lockObject)
             {
-                _transportQueue.Add(request);
+                _exchanges.Add(request);
             }
 
-            PerformNextRequest();
+            await PerformNextRequestAsync(cancellationToken);
         }
 
-        public void RemoveRequest(LongPollingRequest request)
+        public async Task RemoveRequest(TransportExchange request, CancellationToken cancellationToken = default)
         {
             lock (_lockObject)
             {
+                _exchanges.Remove(request);
                 _transmissions.Remove(request);
             }
 
-            PerformNextRequest();
+            await PerformNextRequestAsync(cancellationToken);
         }
 
-        public override void Send(ITransportListener listener, IList<IMutableMessage> messages, int requestTimeout)
+        public override async Task SendAsync(ITransportListener listener, IList<IMutableMessage> messages, int requestTimeout, CancellationToken cancellationToken = default)
         {
             _logger?.LogDebug($"send({messages.Count} message(s)");
 
             var url = Url;
 
-            if (_appendMessageType
-                && messages.Count == 1
-                && messages[0].Meta)
+            if (_appendMessageType &&
+                messages.Count == 1 &&
+                messages[0].Meta)
             {
                 var type = messages[0].Channel.Substring(ChannelFields.META.Length);
                 if (url.EndsWith("/"))
@@ -177,36 +183,26 @@ namespace CometD.NetCore.Client.Transport
                 url += type;
             }
 
-            var request = (HttpWebRequest)WebRequest.Create(url);
-            request.Method = "POST";
-            request.ContentType = "application/json;charset=UTF-8";
-
-            (request.CookieContainer ?? (request.CookieContainer = new CookieContainer())).Add(GetCookieCollection());
-
-            (request.Headers ?? (request.Headers = new WebHeaderCollection())).Add(GetHeaderCollection());
-            if (requestTimeout < DEFAULT_TIMEOUT)
+            var httpRequest = new HttpRequestMessage(HttpMethod.Post, url);
+            foreach (var header in GetHeaderCollection())
             {
-                request.Timeout = requestTimeout + GetOption(MAX_NETWORK_DELAY_OPTION, 5000);
+                httpRequest.Headers.Add(header.Key, header.Value);
             }
 
             var content = JsonConvert.SerializeObject(ObjectConverter.ToListOfDictionary(messages));
+            httpRequest.Content = new StringContent(content, Encoding.UTF8, "application/json");
 
             _logger?.LogDebug($"Send: {content}");
 
-            var longPollingRequest = new LongPollingRequest(listener, messages, request);
-
-            var exchange = new TransportExchange(this, listener, messages, longPollingRequest)
+            // Determine request timeout for this request
+            if (requestTimeout < DEFAULT_TIMEOUT)
             {
-                Content = content,
-                Request = request
-            };
-            lock (_lockObject)
-            {
-                _exchanges.Add(exchange);
+                requestTimeout += GetOption(MAX_NETWORK_DELAY_OPTION, 5000);
             }
 
-            longPollingRequest.Exchange = exchange;
-            AddRequest(longPollingRequest);
+            var exchange = new TransportExchange(this, listener, messages, httpRequest, requestTimeout);
+
+            await AddRequest(exchange, cancellationToken);
         }
 
         public override bool IsSending
@@ -215,14 +211,14 @@ namespace CometD.NetCore.Client.Transport
             {
                 lock (_lockObject)
                 {
-                    if (_transportQueue.Count > 0)
+                    if (_exchanges.Count > 0)
                     {
                         return true;
                     }
 
                     foreach (var transmission in _transmissions)
                     {
-                        if (transmission.Exchange.IsSending)
+                        if (transmission.IsSending)
                         {
                             return true;
                         }
@@ -233,148 +229,53 @@ namespace CometD.NetCore.Client.Transport
             }
         }
 
-        // From http://msdn.microsoft.com/en-us/library/system.net.httpwebrequest.begingetrequeststream.aspx
-        private static void GetRequestStreamCallback(IAsyncResult asynchronousResult)
-        {
-            var exchange = (TransportExchange)asynchronousResult.AsyncState;
-
-            try
-            {
-                // End the operation
-                using (var postStream = exchange.Request.EndGetRequestStream(asynchronousResult))
-                {
-                    // Convert the string into a byte array.
-                    var byteArray = Encoding.UTF8.GetBytes(exchange.Content);
-
-                    // Write to the request stream.
-                    postStream.Write(byteArray, 0, exchange.Content.Length);
-                    postStream.Close();
-                }
-
-                // Start the asynchronous operation to get the response
-                exchange.Listener.OnSending(ObjectConverter.ToListOfIMessage(exchange.Messages));
-                var result = exchange.Request.BeginGetResponse(new AsyncCallback(GetResponseCallback), exchange);
-
-                long timeout = exchange?.LongPollingRequest?.RequestTimout ?? DEFAULT_TIMEOUT;
-                ThreadPool.RegisterWaitForSingleObject(result.AsyncWaitHandle, new WaitOrTimerCallback(TimeoutCallback), exchange, timeout, true);
-
-                exchange.IsSending = false;
-            }
-            catch (Exception e)
-            {
-                exchange.Request?.Abort();
-
-                exchange.Dispose();
-                exchange.Listener.OnException(e, ObjectConverter.ToListOfIMessage(exchange.Messages));
-            }
-        }
-
-        private static void GetResponseCallback(IAsyncResult asynchronousResult)
-        {
-            var exchange = (TransportExchange)asynchronousResult.AsyncState;
-
-            try
-            {
-                // End the operation
-                string responsestring;
-                using (var response = (HttpWebResponse)exchange.Request.EndGetResponse(asynchronousResult))
-                {
-                    using (var streamResponse = response.GetResponseStream())
-                    {
-                        using var streamRead = new StreamReader(streamResponse);
-                        responsestring = streamRead.ReadToEnd();
-                    }
-
-                    _logger?.LogDebug("Received message(s).");
-
-                    if (response.Cookies != null)
-                    {
-                        foreach (Cookie cookie in response.Cookies)
-                        {
-                            exchange.AddCookie(cookie);
-                        }
-                    }
-
-                    response.Close();
-                }
-
-                try
-                {
-                    exchange.Messages = DictionaryMessage.ParseMessages(responsestring);
-                }
-                catch (Exception e)
-                {
-                    _logger?.LogError($"Failed to parse the messages json: {e}");
-                }
-
-                exchange.Listener.OnMessages(exchange.Messages);
-                exchange.Dispose();
-            }
-            catch (Exception e)
-            {
-                exchange.Listener.OnException(e, ObjectConverter.ToListOfIMessage(exchange.Messages));
-                exchange.Dispose();
-            }
-        }
-
-        // From http://msdn.microsoft.com/en-us/library/system.net.httpwebrequest.begingetresponse.aspx
-        // Abort the request if the timer fires.
-        private static void TimeoutCallback(object state, bool timedOut)
-        {
-            if (timedOut)
-            {
-                _logger?.LogDebug("Timeout");
-
-                var exchange = state as TransportExchange;
-
-                exchange?.Request?.Abort();
-
-                exchange?.Dispose();
-            }
-        }
-
         public class TransportExchange
         {
-            public string Content;
-            public HttpWebRequest Request;
-            public ITransportListener Listener;
-            public IList<IMutableMessage> Messages;
-            public LongPollingRequest LongPollingRequest;
-            public bool IsSending;
-
             private readonly LongPollingTransport _parent;
+            private readonly CancellationTokenSource _cancellationTokenSource =
+                new CancellationTokenSource();
 
             public TransportExchange(
                 LongPollingTransport parent,
                 ITransportListener listener,
                 IList<IMutableMessage> messages,
-                LongPollingRequest _lprequest)
+                HttpRequestMessage request,
+                int requestTimeout)
             {
                 _parent = parent;
                 Listener = listener;
                 Messages = messages;
-                Request = null;
-                LongPollingRequest = _lprequest;
-                IsSending = true;
+                Request = request;
+                RequestTimeout = requestTimeout;
+                IsSending = false;
             }
 
-            public void AddCookie(Cookie cookie)
-            {
-                _parent.AddCookie(cookie);
-            }
+            public int RequestTimeout { get; }
 
-            public void Dispose()
+            public HttpRequestMessage Request { get; }
+
+            public ITransportListener Listener { get; }
+
+            public IList<IMutableMessage> Messages { get; internal set; }
+
+            public bool IsSending { get; internal set; }
+
+            public CancellationToken CancellationToken => _cancellationTokenSource.Token;
+
+            public async Task DisposeAsync()
             {
-                _parent.RemoveRequest(LongPollingRequest);
-                lock (_parent)
-                {
-                    _parent._exchanges.Remove(this);
-                }
+                _cancellationTokenSource.Dispose();
+                await _parent.RemoveRequest(this, CancellationToken.None);
             }
 
             public void Abort()
             {
-                Request?.Abort();
+                _cancellationTokenSource.Cancel();
+            }
+
+            public void AbortAfter(int timeout)
+            {
+                _cancellationTokenSource.CancelAfter(timeout);
             }
         }
     }

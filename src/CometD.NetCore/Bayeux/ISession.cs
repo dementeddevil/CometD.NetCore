@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace CometD.NetCore.Bayeux
 {
@@ -53,25 +55,37 @@ namespace CometD.NetCore.Bayeux
         /// </returns>
         string Id { get; }
 
+        /// <summary> <p>Starts a batch, to be ended with {@link #endBatch()}.</p>
+        /// <p>The {@link #batch(Runnable)} method should be preferred since it automatically
+        /// starts and ends a batch without relying on a try/finally block.</p>
+        /// <p>This method is to be used in the cases where the use of {@link #batch(Runnable)}
+        /// is not possible or would make the code more complex.</p>
+        /// </summary>
+        /// <seealso cref="EndBatch()">
+        /// </seealso>
+        /// <seealso cref="batch(IRunnable)">
+        /// </seealso>
+        void StartBatch();
+
         /// <summary> <p>Executes the given command in a batch so that any Bayeux message sent
         /// by the command (via the Bayeux API) is queued up until the end of the
         /// command and then all messages are sent at once.</p>
         /// </summary>
-        /// <param name="batch">the Runnable to run as a batch.
-        /// </param>
-        void Batch(Action batch);
+        /// <param name="batch">the Runnable to run as a batch.</param>
+        /// <param name="cancellationToken"></param>
+        Task BatchAsync(Func<CancellationToken, Task> batch, CancellationToken cancellationToken = default);
 
         /// <summary> Disconnects this session, ending the link between the client and the server peers.</summary>
         /// <seealso cref="isConnected()">
         /// </seealso>
-        void Disconnect();
+        Task DisconnectAsync(CancellationToken cancellationToken = default);
 
         /// <summary> <p>Ends a batch started with {@link #startBatch()}.</p></summary>
         /// <returns> true if the batch ended and there were messages to send.
         /// </returns>
         /// <seealso cref="StartBatch()">
         /// </seealso>
-        bool EndBatch();
+        Task<bool> EndBatchAsync(CancellationToken cancellationToken = default);
 
         /// <summary> <p>Retrieves the value of named session attribute.</p></summary>
         /// <param name="name">the name of the attribute.
@@ -95,17 +109,5 @@ namespace CometD.NetCore.Bayeux
         /// </param>
         /// <param name="val"></param>
         void SetAttribute(string name, object val);
-
-        /// <summary> <p>Starts a batch, to be ended with {@link #endBatch()}.</p>
-        /// <p>The {@link #batch(Runnable)} method should be preferred since it automatically
-        /// starts and ends a batch without relying on a try/finally block.</p>
-        /// <p>This method is to be used in the cases where the use of {@link #batch(Runnable)}
-        /// is not possible or would make the code more complex.</p>
-        /// </summary>
-        /// <seealso cref="EndBatch()">
-        /// </seealso>
-        /// <seealso cref="batch(IRunnable)">
-        /// </seealso>
-        void StartBatch();
     }
 }

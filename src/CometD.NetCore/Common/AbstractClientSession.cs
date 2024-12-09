@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
+using System.Threading.Tasks;
 
 using CometD.NetCore.Bayeux;
 using CometD.NetCore.Bayeux.Client;
@@ -28,9 +29,9 @@ namespace CometD.NetCore.Common
             _extensions.Remove(extension);
         }
 
-        public abstract void Handshake();
+        public abstract Task HandshakeAsync(CancellationToken cancellationToken = default);
 
-        public abstract void Handshake(IDictionary<string, object> fields);
+        public abstract Task HandshakeAsync(IDictionary<string, object> handshakeFields, CancellationToken cancellationToken = default);
 
         public IClientSessionChannel GetChannel(string channelId)
         {
@@ -73,26 +74,26 @@ namespace CometD.NetCore.Common
 
         public abstract string Id { get; }
 
-        public void Batch(Action batch)
+        public async Task BatchAsync(Func<CancellationToken, Task> batch, CancellationToken cancellationToken)
         {
             StartBatch();
             try
             {
-                batch();
+                await batch(cancellationToken);
             }
             finally
             {
-                EndBatch();
+                await EndBatchAsync(cancellationToken);
             }
         }
 
-        public abstract void Disconnect();
+        public abstract Task DisconnectAsync(CancellationToken cancellationToken = default);
 
-        public bool EndBatch()
+        public async Task<bool> EndBatchAsync(CancellationToken cancellationToken = default)
         {
             if (Interlocked.Decrement(ref _batch) == 0)
             {
-                SendBatch();
+                await SendBatchAsync(cancellationToken);
                 return true;
             }
 
@@ -144,7 +145,8 @@ namespace CometD.NetCore.Common
         /// </summary>
         /// <param name="message">the message received.
         /// </param>
-        public void Receive(IMutableMessage message)
+        /// <param name="cancellationToken"></param>
+        public async Task ReceiveAsync(IMutableMessage message, CancellationToken cancellationToken)
         {
             var id = message.Channel;
             if (id == null)
@@ -160,15 +162,17 @@ namespace CometD.NetCore.Common
             var channel = (AbstractSessionChannel)GetChannel(id);
             var channelId = channel.ChannelId;
 
-            channel.NotifyMessageListeners(message);
+            await channel.NotifyMessageListenersAsync(message, cancellationToken);
 
             foreach (var channelPattern in channelId.Wilds)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 var channelIdPattern = NewChannelId(channelPattern);
                 if (channelIdPattern.Matches(channelId))
                 {
                     var wildChannel = (AbstractSessionChannel)GetChannel(channelPattern);
-                    wildChannel.NotifyMessageListeners(message);
+                    await wildChannel.NotifyMessageListenersAsync(message, cancellationToken);
                 }
             }
         }
@@ -242,6 +246,6 @@ namespace CometD.NetCore.Common
             return Convert.ToString(Interlocked.Increment(ref _idGen));
         }
 
-        protected abstract void SendBatch();
+        protected abstract Task SendBatchAsync(CancellationToken cancellationToken = default);
     }
 }

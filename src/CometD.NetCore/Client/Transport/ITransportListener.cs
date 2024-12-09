@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 using CometD.NetCore.Bayeux;
 
@@ -18,13 +20,15 @@ namespace CometD.NetCore.Client.Transport
         /// because the message have already been sent.
         /// </remarks>
         /// <param name="messages">The messages sent.</param>
-        void OnSending(IList<IMessage> messages);
+        /// <param name="cancellationToken">The cancellation token</param>
+        Task OnSendingAsync(IList<IMessage> messages, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Callback method invoke when the given messages have just arrived from the Bayeux server.
         /// </summary>
         /// <param name="messages">The messages arrived.</param>
-        void OnMessages(IList<IMutableMessage> messages);
+        /// <param name="cancellationToken">The cancellation token</param>
+        Task OnMessagesAsync(IList<IMutableMessage> messages, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Callback method invoked when the given messages have failed to be sent
@@ -32,7 +36,8 @@ namespace CometD.NetCore.Client.Transport
         /// </summary>
         /// <param name="ex">The exception that caused the failure.</param>
         /// <param name="messages">The messages being sent.</param>
-        void OnConnectException(Exception ex, IList<IMessage> messages);
+        /// <param name="cancellationToken">The cancellation token</param>
+        Task OnConnectExceptionAsync(Exception ex, IList<IMessage> messages, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Callback method invoked when the given messages have failed to be sent
@@ -40,14 +45,16 @@ namespace CometD.NetCore.Client.Transport
         /// </summary>
         /// <param name="ex">The exception that caused the failure.</param>
         /// <param name="messages">The messages being sent.</param>
-        void OnException(Exception ex, IList<IMessage> messages);
+        /// <param name="cancellationToken">The cancellation token</param>
+        Task OnExceptionAsync(Exception ex, IList<IMessage> messages, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Callback method invoked when the given messages have failed to be sent
         /// because of a HTTP request timeout.
         /// </summary>
         /// <param name="messages">The messages being sent.</param>
-        void OnExpire(IList<IMessage> messages);
+        /// <param name="cancellationToken">The cancellation token</param>
+        Task OnExpireAsync(IList<IMessage> messages, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Callback method invoked when the given messages have failed to be sent
@@ -55,6 +62,7 @@ namespace CometD.NetCore.Client.Transport
         /// </summary>
         /// <param name="info">Bayeux server error message.</param>
         /// <param name="messages">The messages being sent.</param>
-        void OnProtocolError(string info, IList<IMessage> messages);
+        /// <param name="cancellationToken">The cancellation token</param>
+        Task OnProtocolErrorAsync(string info, IList<IMessage> messages, CancellationToken cancellationToken = default);
     }
 }

@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 using CometD.NetCore.Bayeux;
 using CometD.NetCore.Bayeux.Client;
@@ -41,16 +43,16 @@ namespace CometD.NetCore.Common
             _listeners.Add(listener);
         }
 
-        public abstract void Publish(object param1);
+        public abstract Task PublishAsync(object param1, CancellationToken cancellationToken = default);
 
-        public abstract void Publish(object param1, string param2);
+        public abstract Task PublishAsync(object param1, string param2, CancellationToken cancellationToken = default);
 
         public void RemoveListener(IClientSessionChannelListener listener)
         {
             _listeners.Remove(listener);
         }
 
-        public void Subscribe(IMessageListener listener)
+        public async Task SubscribeAsync(IMessageListener listener, CancellationToken cancellationToken = default)
         {
             _subscriptions.Add(listener);
 
@@ -58,11 +60,11 @@ namespace CometD.NetCore.Common
             var count = _subscriptionCount;
             if (count == 1)
             {
-                SendSubscribe();
+                await SendSubscribeAsync(cancellationToken);
             }
         }
 
-        public void Unsubscribe(IMessageListener listener)
+        public async Task UnsubscribeAsync(IMessageListener listener, CancellationToken cancellationToken = default)
         {
             _subscriptions.Remove(listener);
 
@@ -75,15 +77,15 @@ namespace CometD.NetCore.Common
             var count = _subscriptionCount;
             if (count == 0)
             {
-                SendUnSubscribe();
+                await SendUnsubscribeAsync(cancellationToken);
             }
         }
 
-        public void Unsubscribe()
+        public async Task UnsubscribeAsync(CancellationToken cancellationToken = default)
         {
             foreach (var listener in new List<IMessageListener>(_subscriptions))
             {
-                Unsubscribe(listener);
+                await UnsubscribeAsync(listener, cancellationToken);
             }
         }
 
@@ -124,15 +126,19 @@ namespace CometD.NetCore.Common
             _attributes[name] = val;
         }
 
-        public void NotifyMessageListeners(IMessage message)
+        public async Task NotifyMessageListenersAsync(IMessage message, CancellationToken cancellationToken)
         {
             foreach (var listener in _listeners)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // TODO: Support parallelisation of notifications
+                //  via NotificationStrategy class
                 if (listener is IMessageListener)
                 {
                     try
                     {
-                        ((IMessageListener)listener).OnMessage(this, message);
+                        await ((IMessageListener)listener).OnMessage(this, message, cancellationToken);
                     }
                     catch (Exception e)
                     {
@@ -144,13 +150,17 @@ namespace CometD.NetCore.Common
             var list = new List<IMessageListener>(_subscriptions);
             foreach (IClientSessionChannelListener listener in list)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // TODO: Support parallelisation of notifications
+                //  via NotificationStrategy class
                 if (listener is IMessageListener)
                 {
                     if (message.Data != null)
                     {
                         try
                         {
-                            ((IMessageListener)listener).OnMessage(this, message);
+                            await ((IMessageListener)listener).OnMessage(this, message, cancellationToken);
                         }
                         catch (Exception e)
                         {
@@ -175,8 +185,8 @@ namespace CometD.NetCore.Common
             return ChannelId.ToString();
         }
 
-        protected abstract void SendSubscribe();
+        protected abstract Task SendSubscribeAsync(CancellationToken cancellationToken = default);
 
-        protected abstract void SendUnSubscribe();
+        protected abstract Task SendUnsubscribeAsync(CancellationToken cancellationToken = default);
     }
 }

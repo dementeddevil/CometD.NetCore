@@ -1,18 +1,14 @@
 using System.Collections.Generic;
-using System.Collections.Specialized;
-using System.Net;
 
 namespace CometD.NetCore.Client.Transport
 {
     public abstract class HttpClientTransport : ClientTransport
     {
-        private CookieCollection _cookieCollection;
-        private WebHeaderCollection _headerCollection;
+        private readonly IDictionary<string, string> _headers = new Dictionary<string, string>();
 
-        protected HttpClientTransport(string name, IDictionary<string, object> options, NameValueCollection headers)
+        protected HttpClientTransport(string name, IDictionary<string, object> options, IDictionary<string, string> headers)
             : base(name, options)
         {
-            SetHeaderCollection(new WebHeaderCollection());
             AddHeaders(headers);
         }
 
@@ -21,36 +17,17 @@ namespace CometD.NetCore.Client.Transport
             get; set;
         }
 
-        public void SetCookieCollection(CookieCollection cookieCollection)
+        protected internal void AddHeaders(IDictionary<string, string> headers)
         {
-            _cookieCollection = cookieCollection;
+            foreach (var header in headers)
+            {
+                _headers.Add(header.Key, header.Value);
+            }
         }
 
-        public void SetHeaderCollection(WebHeaderCollection headerCollection)
+        protected IDictionary<string, string> GetHeaderCollection()
         {
-            _headerCollection = headerCollection;
-        }
-
-        protected internal void AddCookie(Cookie cookie)
-        {
-            var cookieCollection = _cookieCollection;
-            cookieCollection?.Add(cookie);
-        }
-
-        protected internal void AddHeaders(NameValueCollection headers)
-        {
-            var headerCollection = _headerCollection;
-            headerCollection?.Add(headers);
-        }
-
-        protected CookieCollection GetCookieCollection()
-        {
-            return _cookieCollection;
-        }
-
-        protected WebHeaderCollection GetHeaderCollection()
-        {
-            return _headerCollection;
+            return _headers;
         }
     }
 }

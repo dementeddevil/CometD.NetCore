@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 using CometD.NetCore.Bayeux;
 using CometD.NetCore.Common;
@@ -34,7 +36,8 @@ namespace CometD.NetCore.Client.Transport
         /// </summary>
         /// <param name="listener"></param>
         /// <param name="messages"></param>
-        /// <param name="requestTimeOut">Default timeout for the request is 2min or 120000 seconds.</param>
-        public abstract void Send(ITransportListener listener, IList<IMutableMessage> messages, int requestTimeOut);
+        /// <param name="requestTimeout">Default timeout for the request is 2min or 120000 seconds.</param>
+        /// <param name="cancellationToken"></param>
+        public abstract Task SendAsync(ITransportListener listener, IList<IMutableMessage> messages, int requestTimeout, CancellationToken cancellationToken = default);
     }
 }

@@ -1,12 +1,13 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<TargetFrameworks>netstandard2.0;netstandard2.1;net7.0;</TargetFrameworks>
+		<TargetFrameworks>netstandard2.1;net7.0;</TargetFrameworks>
 		<RootNamespace>CometD.NetCore2</RootNamespace>
 		<PackageId>CometD.NetCore2</PackageId>
 	</PropertyGroup>
 
 	<ItemGroup>
+		<PackageReference Include="Microsoft.Extensions.Http" Version="7.0.0" />
 		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
 		<PackageReference Include="Newtonsoft.Json" />
 	</ItemGroup>

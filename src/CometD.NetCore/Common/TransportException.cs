@@ -37,6 +37,7 @@ namespace CometD.NetCore.Common
         /// <summary>
         /// Initializes a new instance of the <see cref="TransportException"/> class with serialized data.
         /// </summary>
+        [Obsolete]
         protected TransportException(SerializationInfo info, StreamingContext context)
             : base(info, context)
         {

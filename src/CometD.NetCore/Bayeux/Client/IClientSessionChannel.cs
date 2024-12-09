@@ -31,8 +31,8 @@ namespace CometD.NetCore.Bayeux.Client
         void AddListener(IClientSessionChannelListener listener);
 
         /// <summary> Equivalent to {@link #publish(Object, Object) publish(data, null)}.</summary>
-        /// <param name="data">the data to publish.
-        /// </param>
+        /// <param name="data">the data to publish.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
         Task PublishAsync(object data, CancellationToken cancellationToken = default);
 
         /// <summary> Publishes the given {@code data} to this channel,
@@ -44,6 +44,7 @@ namespace CometD.NetCore.Bayeux.Client
         /// <param name="messageId">the message id to set on the message, or null to let the
         /// implementation choose the message id.
         /// </param>
+        /// <param name="cancellationToken">The cancellation token.</param>
         /// <seealso cref="IMessage.getId()">
         /// </seealso>
         Task PublishAsync(object data, string messageId, CancellationToken cancellationToken = default);
@@ -55,10 +56,27 @@ namespace CometD.NetCore.Bayeux.Client
         /// </param>
         void RemoveListener(IClientSessionChannelListener listener);
 
+        /// <summary>
+        /// Subscribes the listener.
+        /// </summary>
+        /// <param name="listener">The listener.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        /// <returns></returns>
         Task SubscribeAsync(IMessageListener listener, CancellationToken cancellationToken = default);
 
+        /// <summary>
+        /// Unsubscribes the specified listener.
+        /// </summary>
+        /// <param name="listener">The listener.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        /// <returns></returns>
         Task UnsubscribeAsync(IMessageListener listener, CancellationToken cancellationToken = default);
 
+        /// <summary>
+        /// Unsubscribes all listeners.
+        /// </summary>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        /// <returns></returns>
         Task UnsubscribeAsync(CancellationToken cancellationToken = default);
     }
 

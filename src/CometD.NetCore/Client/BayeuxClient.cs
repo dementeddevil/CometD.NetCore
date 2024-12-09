@@ -936,7 +936,7 @@ namespace CometD.NetCore.Client
             {
                 get
                 {
-                    int result = 0;
+                    var result = 0;
                     if (Advice?.ContainsKey(MessageFields.INTERVAL_FIELD) == true)
                     {
                         result = ObjectConverter.ToInt32(Advice[MessageFields.INTERVAL_FIELD], result);
@@ -1155,7 +1155,7 @@ namespace CometD.NetCore.Client
 
                 if (!(adviceTimeoutField is null))
                 {
-                    int adviceTimeoutValue = Convert.ToInt32(adviceTimeoutField);
+                    var adviceTimeoutValue = Convert.ToInt32(adviceTimeoutField);
                     if (adviceTimeoutValue != 0)
                     {
                         await _bayeuxClient?.ScheduleConnectAsync(Interval, Backoff, adviceTimeoutValue, cancellationToken);
